@@ -6,10 +6,16 @@ Authors:     esmuii
 License:     BSD3
 Plugins:     META (0.3), DevFiles (0.3)
 
-Executable "min-caml"
+
+Executable main
   Path:       src
+  DataFiles: stub/*
   BuildTools: ocamlbuild
   CSources:   float.c
   CompiledObject: native
   MainIs:     main.ml
-  
+
+Test "test"
+  Type: Custom (0.3)
+  Command: make MINCAML=$main STUB=../stub
+  WorkingDirectory: test
