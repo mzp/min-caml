@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 90877ed7b61035f2fc90a26e56d84c0a)
+# DO NOT EDIT (digest: 74af1a00ea96776e93c6e354a95b7473)
 # Ignore VCS directories, you can use the same kind of rule outside 
 # OASIS_START/STOP if you want to exclude directories that contains 
 # useless stuff for the build process
@@ -15,4 +15,16 @@
 "_darcs": not_hygienic
 # Executable main
 "src/main.native": use_libmain_stubs
+"src/main.native": pkg_llvm
+"src/main.native": pkg_llvm.executionengine
+"src/main.native": pkg_llvm.analysis
+"src/main.native": pkg_llvm.bitwriter
+<src/*.ml{,i}>: pkg_llvm
+<src/*.ml{,i}>: pkg_llvm.executionengine
+<src/*.ml{,i}>: pkg_llvm.analysis
+<src/*.ml{,i}>: pkg_llvm.bitwriter
+"src/float.c": pkg_llvm
+"src/float.c": pkg_llvm.executionengine
+"src/float.c": pkg_llvm.analysis
+"src/float.c": pkg_llvm.bitwriter
 # OASIS_STOP

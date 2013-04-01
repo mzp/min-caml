@@ -1,0 +1,5 @@
+#!/bin/sh
+# i'm in arch/
+cd $(dirname $0)
+cp llvm/*.ml llvm/*.mli ../src/
+#ln -sf llvm/libmincaml.S ../stub/

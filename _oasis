@@ -11,6 +11,7 @@ Executable main
   Path:       src
   DataFiles: stub/*
   BuildTools: ocamlbuild
+  BuildDepends: llvm, llvm.executionengine, llvm.analysis, llvm.bitwriter
   CSources:   float.c
   CompiledObject: native
   MainIs:     main.ml
