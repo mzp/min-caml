@@ -4,10 +4,12 @@ Version:     0.2.0
 Synopsis:    minimal caml
 Authors:     esmuii
 License:     BSD3
-Plugins:     META (0.3), StdFiles (0.3)
+Plugins:     META (0.3), DevFiles (0.3)
 
 Executable "min-caml"
   Path:       src
   BuildTools: ocamlbuild
+  CSources:   float.c
+  CompiledObject: native
   MainIs:     main.ml
   
