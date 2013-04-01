@@ -2,7 +2,7 @@ OASISFormat: 0.3
 Name:        min-caml
 Version:     0.2.0
 Synopsis:    minimal caml
-Authors:     esmuii
+Authors:     Eijiro Sumii, Moe Masuko, and Kenichi Asai
 License:     BSD3
 Plugins:     META (0.3), DevFiles (0.3)
 
