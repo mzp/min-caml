@@ -12,17 +12,19 @@ inprod inprod-rec inprod-loop matmul matmul-flat
 
 do_test: $(TESTS:%=%.cmp)
 
-.PRECIOUS: %.s % %.res %.ans %.cmp
+#.PRECIOUS: %.s % %.res %.ans %.cmp
 TRASH = $(TESTS:%=%.s) $(TESTS:%=%) $(TESTS:%=%.res) $(TESTS:%=%.ans) $(TESTS:%=%.cmp)
 
 %.s: %.ml
 	$(MINCAML) $*
-%: %.s $(STUB)/libmincaml.S $(STUB)/stub.c
+%.out: %.s $(STUB)/libmincaml.S $(STUB)/stub.c
 	$(CC) $(CFLAGS) -m32 $^ -lm -o $@
-%.res: %
-	$< > $@
+%.res: %.out
+	./$< > $@
 %.ans: %.ml
 	ocaml $< > $@
 %.cmp: %.res %.ans
 	diff $^ > $@
 
+clean:
+	rm -rf $(TRASH)

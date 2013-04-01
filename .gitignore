@@ -1,3 +1,7 @@
 _build/
 *.native
 *.log
+*.cmp
+*.ans
+*.res
+*.out
