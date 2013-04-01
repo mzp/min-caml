@@ -1,0 +1,5 @@
+#!/bin/sh
+# i'm in arch/
+cd $(dirname $0)
+ln -sf PowerPC/*.ml PowerPC/*.mli ../src/
+ln -sf PowerPC/libmincaml.S ../stub/
