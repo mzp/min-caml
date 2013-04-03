@@ -49,6 +49,24 @@ let varref { table } name =
 let string_of_id (Id.L str) =
   str
 
+let declare_fun context name args ret =
+  let args_t =
+    Array.of_list @@ List.map (of_type context) args
+  in
+  let ret_t =
+    of_type context ret
+  in
+  let fun_t =
+    function_type ret_t args_t
+  in
+  let value =
+    declare_function name fun_t context.module_
+  in
+  value
+
+let is_prefix prefix str =
+  String.sub str 0 (String.length prefix) = prefix
+
 let rec generate_value context : Closure.t -> Llvm.llvalue =
   let open Closure in
   function
@@ -84,6 +102,14 @@ let rec generate_value context : Closure.t -> Llvm.llvalue =
     | MakeCls _ -> assert false
     | AppCls _ -> assert false
     | AppDir (f, args) ->
+        let name =
+          string_of_id f
+        in
+        let () = 
+          if is_prefix "min_caml_" name then
+            vardef context name @@
+              declare_fun context name [ Type.Int ] Type.Unit
+        in
         let t =
           Id.gentmp Type.Int in
         let args =
@@ -106,14 +132,8 @@ let generate_function ({ llcontext; builder; module_ } as context) { Closure.nam
   let args =
     args @ formal_fv
   in
-  let args_t =
-    Array.of_list @@ List.map (of_type context $ snd) args
-  in
-  let fun_t =
-    function_type (of_type context (ret_type t)) args_t
-  in
   let fun_ =
-    declare_function (string_of_id name) fun_t module_
+    declare_fun context (string_of_id name) (List.map snd args) (ret_type t)
   in
   let bb =
     append_block llcontext "entry" fun_
@@ -158,7 +178,7 @@ let f (Closure.Prog(funs, body)) =
   in
   let () =
     generate_function context {
-      Closure.name = (Id.L "main", Type.Fun([], Type.Unit));
+      Closure.name = (Id.L "min_caml_start", Type.Fun([], Type.Unit));
       args         = []; 
       formal_fv    = []; 
       body
