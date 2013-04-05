@@ -10,6 +10,9 @@ let ($) f g x =
 let uncurry f (x, y) =
   f x y
 
+let flip f x y =
+  f y x
+
 (* types *)
 type context = {
   llcontext : Llvm.llcontext;
@@ -62,6 +65,7 @@ let declare_fun context name args ret =
   let value =
     declare_function name fun_t context.module_
   in
+  vardef context name value;
   value
 
 let is_prefix prefix str =
@@ -102,15 +106,7 @@ let rec generate_value context : Closure.t -> Llvm.llvalue =
     | MakeCls _ -> assert false
     | AppCls _ -> assert false
     | AppDir (f, args) ->
-        let name =
-          string_of_id f
-        in
-        let () = 
-          if is_prefix "min_caml_" name then
-            vardef context name @@
-              declare_fun context name [ Type.Int ] Type.Unit
-        in
-        let t =
+       let t =
           Id.gentmp Type.Int in
         let args =
           Array.of_list @@ List.map (varref context) args
@@ -138,9 +134,6 @@ let generate_function ({ llcontext; builder; module_ } as context) { Closure.nam
   let bb =
     append_block llcontext "entry" fun_
   in
-  let () =
-    vardef context (string_of_id name) fun_
-  in
   let () = 
     List.iter (uncurry (vardef context)) @@
       List.combine (List.map fst args) (Array.to_list @@ params fun_)
@@ -158,7 +151,7 @@ let generate_function ({ llcontext; builder; module_ } as context) { Closure.nam
   Llvm_analysis.assert_valid_function fun_
 
 let f (Closure.Prog(funs, body)) =
-  let llcontext =
+ let llcontext =
     Llvm.global_context ()
   in
   let builder =
@@ -172,6 +165,14 @@ let f (Closure.Prog(funs, body)) =
   in
   let context =
     { llcontext; builder; module_; table }
+  in
+  let _ =
+    flip M.iter !Typing.extenv begin fun name (Type.Fun (ts,t)) ->
+      let name = 
+        "min_caml_" ^ name
+      in
+      ignore @@ declare_fun context name ts t
+    end
   in
   let () = 
     List.iter (generate_function context) funs

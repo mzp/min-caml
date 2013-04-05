@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-extern void min_caml_start(char *, char *);
+extern void min_caml_start();
 
 /* "stderr" is a macro and cannot be referred to in libmincaml.S, so
    this "min_caml_stderr" is used (in place of "__iob+32") for better
@@ -19,7 +19,7 @@ int main() {
     return 1;
   }
   fprintf(stderr, "sp = %p, hp = %p\n", sp, hp);
-  min_caml_start(sp, hp);
+  min_caml_start();
 
   return 0;
 }
