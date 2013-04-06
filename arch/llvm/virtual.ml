@@ -1,6 +1,9 @@
 open Llvm
 
 (* utils *)
+let id x =
+  x
+
 let (@@) f x =
   f x
 
@@ -49,7 +52,7 @@ module Env = struct
   let varref name { venv; _ } =
     M.find name venv
 
-  let tyref name { tenv; _ } =
+  let typeref name { tenv; _ } =
     M.find name tenv
 end
 
@@ -97,6 +100,22 @@ module IR = struct
       | Var _ ->
           assert false
 
+  let block { llcontext; builder; _ } name fun_ ~f =
+    let bb = 
+      append_block llcontext name fun_ 
+    in
+    let () =
+      position_at_end bb builder
+    in
+    (bb, f ())
+
+  let current_block { builder; _ } = 
+    insertion_block builder
+
+  let update_block { builder; _ } bb ~f =
+    position_at_end bb builder;
+    f ()
+    
   let declare_fun t name ty =
     declare_function name (of_type t ty) t.module_
 
@@ -104,17 +123,9 @@ module IR = struct
     let fun_ =
       declare_fun t name ty
     in
-    let bb =
-      append_block llcontext "entry" fun_
-    in
     let () =
-      position_at_end bb builder
-    in
-    let v =
-      f fun_ t
-    in
-    let () = 
-      ignore (build_ret v builder)
+      ignore @@ block t "entry" fun_ ~f:(fun () ->
+        ignore @@ build_ret (f t fun_) builder)
     in
     dump_value fun_;
     Llvm_analysis.assert_valid_function fun_;
@@ -127,6 +138,18 @@ module IR = struct
     in
     build_call f args tmp builder
 
+  let phi { builder; _ } xs =
+    let tmp =
+      Id.gentmp Type.Int
+    in
+    build_phi xs tmp builder
+
+  let cond_br { builder; _ } cond then_ else_ =
+    build_cond_br cond then_ else_ builder
+
+  let br { builder; _ } bb =
+    build_br bb builder
+
   let unit t =
     const_int (of_type t Type.Unit) 0
 
@@ -135,11 +158,75 @@ module IR = struct
 
   let float t f =
     const_float (of_type t Type.Float) f
+
 end
 
 module GenValue = struct
   open Closure
   type t = Llvm.llvalue
+
+  let if_ (ir, env) cond then_ else_ =
+    (*
+        start:
+          br <cond>, label %then, label %else ;; (4)
+
+        then:
+          %tmp1 = <then>    ;; (1)
+          br label %ifcont  ;; (5)
+
+        else:
+          %tmp2 = <else>    ;; (2)
+          br label %ifcont  ;; (6)
+
+        ifcont:
+          %tmp = phi [ %tmp1 %then], [%tmp2, %else ] ;; (3)
+    *)
+    let start_bb = 
+      IR.current_block ir
+    in
+    let fun_ =
+      block_parent start_bb
+    in
+    (* (1) *)
+    let (then_bb, (then_val, then_br))  =
+      IR.block ir "then" fun_ ~f:begin fun () ->
+        let v =
+          then_ (ir, env)
+        in
+        (v, IR.current_block ir)
+      end
+    in
+    (* (2) *)
+    let (else_bb, (else_val, else_br))  =
+      IR.block ir "else" fun_ ~f:begin fun () ->
+        let v =
+          else_ (ir, env)
+        in
+        (v, IR.current_block ir)
+      end
+    in
+    (* (3) *)
+    let (ifcont_bb, phi) =
+      IR.block ir "ifcont" fun_ ~f:begin fun () ->
+        IR.phi ir  [(then_val, then_br); (else_val, else_br)]
+      end
+    in
+    (* (4) *)
+    let ()  =
+      IR.update_block ir start_bb ~f:begin fun () ->
+        ignore @@ IR.cond_br ir cond then_bb else_bb
+      end
+    in
+    (* (5) *)
+    let () =
+      IR.update_block ir then_br ~f:(fun () -> ignore @@ IR.br ir ifcont_bb)
+    in
+    (* (6) *)
+    let () =
+      IR.update_block ir else_br ~f:(fun () -> ignore @@ IR.br ir ifcont_bb)
+    in
+    IR.update_block ir ifcont_bb ~f:id;
+    phi
 
   let rec f (ir, env) : Closure.t -> Llvm.llvalue =
   function
@@ -165,9 +252,18 @@ module GenValue = struct
         const_fmul (Env.varref x env) (Env.varref y env)
     | FDiv (x, y) ->
         const_fdiv (Env.varref x env) (Env.varref y env)
-    | IfEq (lhs, rhs, then_, else_) -> 
+    | IfEq (x, y, then_, else_) -> 
+        let cond =
+          match Env.typeref x env, Env.typeref y env with
+        | Type.Bool, Type.Bool | Type.Int,Type.Int -> 
+            const_icmp Icmp.Eq (Env.varref x env) (Env.varref y env)
+        | Type.Float, Type.Float -> 
+            const_fcmp Fcmp.Oeq (Env.varref x env) (Env.varref y env)
+        | _ -> failwith "equality supported only for bool, int, and float"
+        in
+        if_ (ir, env) cond (flip f then_) (flip f else_)
+    | IfLE _ ->
         assert false
-    | IfLE _ -> assert false
     | Let ((x, ty), t1, t2) ->
         let v =
           f (ir, env) t1
@@ -215,7 +311,7 @@ module GenFunction = struct
           failwith "must not happen"
     in
     let fun_ =
-      IR.define_fun ir (string_of_id name) ty ~f:begin fun fun_ ir ->
+      IR.define_fun ir (string_of_id name) ty ~f:begin fun ir fun_ ->
         (* argument *) 
         let env =
           Array.to_list (params fun_) 
