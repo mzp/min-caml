@@ -4,6 +4,9 @@ open Llvm
 let (@@) f x =
   f x
 
+let (+>) x f =
+  f x
+
 let ($) f g x =
   f (g x)
 
@@ -13,176 +16,245 @@ let uncurry f (x, y) =
 let flip f x y =
   f y x
 
-(* types *)
-type context = {
-  llcontext : Llvm.llcontext;
-  builder : Llvm.llbuilder;
-  module_ : Llvm.llmodule;
-  table   : (Id.t , Llvm.llvalue) Hashtbl.t;
-}
+let is_prefix prefix str =
+  String.sub str 0 (String.length prefix) = prefix
 
-(* code generation *)
-let rec of_type ({ llcontext } as context) =
-  let open Type in
-  function
-    | Unit | Bool ->
-        i1_type llcontext
-    | Int ->
-        i32_type llcontext
-    | Float ->
-        double_type llcontext
-    | Fun (targs, t) ->
-       function_type (of_type context t) @@ Array.of_list @@ List.map (of_type context) targs
-    | Tuple _ ->
-        assert false
-    | Array _ ->
-        assert false
-    | Var _ ->
-        assert false
-
-let vardef { table } name value =
-  Printf.printf "def: %s\n" name;
-  Hashtbl.add table name value;
-  set_value_name name value
-
-let varref { table } name =
-  Printf.printf "ref: %s\n" name;
-  Hashtbl.find table name
+let array_map f xs =
+  Array.of_list @@ List.map f xs
 
 let string_of_id (Id.L str) =
   str
 
-let declare_fun context name args ret =
-  let args_t =
-    Array.of_list @@ List.map (of_type context) args
-  in
-  let ret_t =
-    of_type context ret
-  in
-  let fun_t =
-    function_type ret_t args_t
-  in
-  let value =
-    declare_function name fun_t context.module_
-  in
-  vardef context name value;
-  value
 
-let is_prefix prefix str =
-  String.sub str 0 (String.length prefix) = prefix
 
-let rec generate_value context : Closure.t -> Llvm.llvalue =
-  let open Closure in
+(* env *)
+module Env = struct
+  type t = {
+    venv : Llvm.llvalue M.t;
+    tenv : Type.t M.t
+  }
+
+  let empty = {
+    venv = M.empty;
+    tenv = M.empty
+  }
+
+  let def name ty v { venv; tenv } = 
+    set_value_name name v;
+    {
+      venv = M.add name v  venv;
+      tenv = M.add name ty tenv
+    }
+
+  let varref name { venv; _ } =
+    M.find name venv
+
+  let tyref name { tenv; _ } =
+    M.find name tenv
+end
+
+module IR = struct
+  open Llvm
+  type t = {
+    llcontext : Llvm.llcontext;
+    builder : Llvm.llbuilder;
+    module_ : Llvm.llmodule
+  }
+
+  let module_ { module_; _ } =
+    module_
+
+  let init () = 
+    let llcontext =
+      Llvm.global_context ()
+    in
+    let builder =
+      Llvm.builder llcontext
+    in
+    let module_ = 
+      create_module llcontext "mincaml_module"
+    in
+    { llcontext; builder; module_ }
+ 
+
+  let rec of_type ({ llcontext } as t) =
+    let open Type in
+    function
+      | Unit | Bool ->
+          i1_type llcontext
+      | Int ->
+          i32_type llcontext
+      | Float ->
+          double_type llcontext
+      | Fun (args, ret) ->
+          args
+          +> array_map (of_type t)
+          +> function_type (of_type t ret)
+      | Tuple _ ->
+          assert false
+      | Array _ ->
+          assert false
+      | Var _ ->
+          assert false
+
+  let declare_fun t name ty =
+    declare_function name (of_type t ty) t.module_
+
+  let define_fun ({ llcontext; builder; module_ } as t) name ty ~f =
+    let fun_ =
+      declare_fun t name ty
+    in
+    let bb =
+      append_block llcontext "entry" fun_
+    in
+    let () =
+      position_at_end bb builder
+    in
+    let v =
+      f fun_ t
+    in
+    let () = 
+      ignore (build_ret v builder)
+    in
+    dump_value fun_;
+    Llvm_analysis.assert_valid_function fun_;
+    fun_
+
+  (* call function and retrun value by using temp variable *)
+  let fun_call { builder; _} f args =
+    let tmp =
+      Id.gentmp Type.Int
+    in
+    build_call f args tmp builder
+
+  let unit t =
+    const_int (of_type t Type.Unit) 0
+
+  let int t n =
+    const_int (of_type t Type.Int) n
+
+  let float t f =
+    const_float (of_type t Type.Float) f
+end
+
+module GenValue = struct
+  open Closure
+  type t = Llvm.llvalue
+
+  let rec f (ir, env) : Closure.t -> Llvm.llvalue =
   function
     | Unit ->
-        const_int (of_type context Type.Unit) 0
+        IR.unit ir
     | Int n ->
-        const_int (of_type context Type.Int) n
+        IR.int ir n
     | Float f ->
-        const_float (of_type context Type.Float) f
-    | Neg name  ->
-        const_neg (varref context name)
-    | Add (lhs, rhs) ->
-        const_add (varref context lhs) (varref context rhs)
-    | Sub (lhs, rhs) ->
-        const_sub (varref context lhs) (varref context rhs)
-    | FNeg name ->
-        const_fneg (varref context name)
-    | FAdd (lhs, rhs) ->
-        const_fadd (varref context lhs) (varref context rhs)
-    | FSub (lhs, rhs) ->
-        const_fsub (varref context lhs) (varref context rhs)
-    | FMul (lhs, rhs) ->
-        const_fmul (varref context lhs) (varref context rhs)
-    | FDiv (lhs, rhs) ->
-        const_fdiv (varref context lhs) (varref context rhs)
-    | IfEq _ -> assert false
+        IR.float ir f
+    | Neg x ->
+        const_neg (Env.varref x env) 
+    | Add (x, y) ->
+        const_add (Env.varref x env) (Env.varref y env)
+    | Sub (x, y) ->
+        const_sub (Env.varref x env) (Env.varref y env)
+    | FNeg x ->
+        const_fneg (Env.varref x env)
+    | FAdd (x, y) ->
+        const_fadd (Env.varref x env) (Env.varref y env)
+    | FSub (x, y) ->
+        const_fsub (Env.varref x env) (Env.varref y env)
+    | FMul (x, y) ->
+        const_fmul (Env.varref x env) (Env.varref y env)
+    | FDiv (x, y) ->
+        const_fdiv (Env.varref x env) (Env.varref y env)
+    | IfEq (lhs, rhs, then_, else_) -> 
+        assert false
     | IfLE _ -> assert false
-    | Let ((name, _), t1, t2) ->
-        vardef context name @@ generate_value context t1;
-        generate_value context t2
+    | Let ((x, ty), t1, t2) ->
+        let v =
+          f (ir, env) t1
+        in
+        f (ir, Env.def x ty v env) t2
     | Var name ->
-        varref context name
+        Env.varref name env
     | MakeCls _ -> assert false
     | AppCls _ -> assert false
     | AppDir (f, args) ->
-       let t =
-          Id.gentmp Type.Int in
-        let args =
-          Array.of_list @@ List.map (varref context) args
+        let f =
+          Env.varref (string_of_id f) env 
         in
-        build_call (varref context (string_of_id f)) args t context.builder
+        let args =
+          array_map (flip Env.varref env) args
+        in
+        IR.fun_call ir f args
     | Tuple _ -> assert false
     | LetTuple _ -> assert false
     | Get _ -> assert false
     | Put _ -> assert false
     | ExtArray _ -> assert false
+end
 
-let ret_type = function
-  | Type.Fun (_, t) -> t
-  | _ -> assert false
-
-let generate_function ({ llcontext; builder; module_ } as context) { Closure.name = (name, t); args; formal_fv; body } =
-  let _ =
-    print_endline (string_of_id name) in
-  let args =
-    args @ formal_fv
-  in
-  let fun_ =
-    declare_fun context (string_of_id name) (List.map snd args) (ret_type t)
-  in
-  let bb =
-    append_block llcontext "entry" fun_
-  in
-  let () = 
-    List.iter (uncurry (vardef context)) @@
-      List.combine (List.map fst args) (Array.to_list @@ params fun_)
-  in
-  let () =
-    position_at_end bb builder
-  in
-  let ret =
-    generate_value context body
-  in
-  let () = 
-    ignore (build_ret ret builder)
-  in
-  dump_value fun_;
-  Llvm_analysis.assert_valid_function fun_
-
-let f (Closure.Prog(funs, body)) =
- let llcontext =
-    Llvm.global_context ()
-  in
-  let builder =
-    Llvm.builder llcontext
-  in
-  let module_ = 
-    create_module llcontext "mincaml_module"
-  in
-  let table =
-    Hashtbl.create 0
-  in
-  let context =
-    { llcontext; builder; module_; table }
-  in
-  let _ =
-    flip M.iter !Typing.extenv begin fun name (Type.Fun (ts,t)) ->
+module GenFunction = struct
+  let import_extfun (ir, env) =
+    let f name ty env =
       let name = 
         "min_caml_" ^ name
       in
-      ignore @@ declare_fun context name ts t
-    end
+      let v = 
+        IR.declare_fun ir name ty
+      in 
+      Env.def name ty v env
+    in
+    M.fold f !Typing.extenv env 
+
+  let f (ir, env) { Closure.name = (name, ty); args; formal_fv; body } =
+    let ty =
+      match ty with
+      | Type.Fun (_, r) ->
+          (* add formal_fv's type to signature *)
+          Type.Fun (List.map snd (args @ formal_fv), r) 
+      | _ ->
+          failwith "must not happen"
+    in
+    let fun_ =
+      IR.define_fun ir (string_of_id name) ty ~f:begin fun fun_ ir ->
+        (* argument *) 
+        let env =
+          Array.to_list (params fun_) 
+          +> List.combine (args @ formal_fv)
+          +> ListLabels.fold_left ~init:env ~f:begin fun env ((x, ty), v) ->
+            Env.def x ty v env 
+          end
+        in
+        (* self *)
+        let env =
+          Env.def (string_of_id name) ty fun_ env
+        in
+        GenValue.f (ir, env) body
+      end
+    in
+    (ir, Env.def (string_of_id name) ty fun_ env)
+end
+
+let stub body = {
+  Closure.name = (Id.L "min_caml_start", Type.Fun([], Type.Unit));
+  args         = []; 
+  formal_fv    = []; 
+  body
+} 
+ 
+let f (Closure.Prog(funs, body)) =
+ let ir =
+    IR.init ()
   in
-  let () = 
-    List.iter (generate_function context) funs
+  let env = 
+    Env.empty
   in
-  let () =
-    generate_function context {
-      Closure.name = (Id.L "min_caml_start", Type.Fun([], Type.Unit));
-      args         = []; 
-      formal_fv    = []; 
-      body
-    }
+  let env =
+    GenFunction.import_extfun (ir,env)
   in
-  context.module_
+  let (ir, env) =
+    List.fold_left GenFunction.f (ir, env) funs
+  in
+  let (ir,env) =
+    GenFunction.f (ir,env ) (stub body)
+  in
+  IR.module_ ir
