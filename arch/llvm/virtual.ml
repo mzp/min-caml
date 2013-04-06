@@ -153,11 +153,41 @@ module IR = struct
   let unit t =
     const_int (of_type t Type.Unit) 0
 
+  let add { builder; _} x y =
+    build_add x y (Id.gentmp Type.Int) builder
+
+  let sub { builder; _} x y =
+    build_sub x y (Id.gentmp Type.Int) builder
+
+  let neg { builder; _ } x =
+    build_neg x (Id.gentmp Type.Int) builder
+
+  let fadd { builder; _} x y =
+    build_fadd x y (Id.gentmp Type.Float) builder
+
+  let fsub { builder; _} x y =
+    build_fsub x y (Id.gentmp Type.Float) builder
+
+  let fmul { builder; _} x y =
+    build_fmul x y (Id.gentmp Type.Float) builder
+
+  let fdiv { builder; _} x y =
+    build_fdiv x y (Id.gentmp Type.Float) builder
+
+  let fneg { builder; _ } x =
+    build_fneg x (Id.gentmp Type.Float) builder
+
   let int t n =
     const_int (of_type t Type.Int) n
 
   let float t f =
     const_float (of_type t Type.Float) f
+
+  let icmp { builder; _ } op x y =
+    build_icmp op x y (Id.gentmp Type.Int) builder
+
+  let fcmp { builder; _ } op x y =
+    build_fcmp op x y (Id.gentmp Type.Float) builder
 
 end
 
@@ -181,12 +211,14 @@ module GenValue = struct
         ifcont:
           %tmp = phi [ %tmp1 %then], [%tmp2, %else ] ;; (3)
     *)
+
     let start_bb = 
       IR.current_block ir
     in
     let fun_ =
       block_parent start_bb
     in
+
     (* (1) *)
     let (then_bb, (then_val, then_br))  =
       IR.block ir "then" fun_ ~f:begin fun () ->
@@ -237,33 +269,41 @@ module GenValue = struct
     | Float f ->
         IR.float ir f
     | Neg x ->
-        const_neg (Env.varref x env) 
+        IR.neg ir (Env.varref x env) 
     | Add (x, y) ->
-        const_add (Env.varref x env) (Env.varref y env)
+        IR.add ir (Env.varref x env) (Env.varref y env)
     | Sub (x, y) ->
-        const_sub (Env.varref x env) (Env.varref y env)
+        IR.sub ir (Env.varref x env) (Env.varref y env)
     | FNeg x ->
-        const_fneg (Env.varref x env)
+        IR.fneg ir (Env.varref x env)
     | FAdd (x, y) ->
-        const_fadd (Env.varref x env) (Env.varref y env)
+        IR.fadd ir (Env.varref x env) (Env.varref y env)
     | FSub (x, y) ->
-        const_fsub (Env.varref x env) (Env.varref y env)
+        IR.fsub ir (Env.varref x env) (Env.varref y env)
     | FMul (x, y) ->
-        const_fmul (Env.varref x env) (Env.varref y env)
+        IR.fmul ir (Env.varref x env) (Env.varref y env)
     | FDiv (x, y) ->
-        const_fdiv (Env.varref x env) (Env.varref y env)
+        IR.fdiv ir (Env.varref x env) (Env.varref y env)
     | IfEq (x, y, then_, else_) -> 
         let cond =
           match Env.typeref x env, Env.typeref y env with
         | Type.Bool, Type.Bool | Type.Int,Type.Int -> 
-            const_icmp Icmp.Eq (Env.varref x env) (Env.varref y env)
+            IR.icmp ir Icmp.Eq (Env.varref x env) (Env.varref y env)
         | Type.Float, Type.Float -> 
-            const_fcmp Fcmp.Oeq (Env.varref x env) (Env.varref y env)
+            IR.fcmp ir Fcmp.Oeq (Env.varref x env) (Env.varref y env)
         | _ -> failwith "equality supported only for bool, int, and float"
         in
         if_ (ir, env) cond (flip f then_) (flip f else_)
-    | IfLE _ ->
-        assert false
+    | IfLE (x, y, then_, else_) ->
+        let cond =
+          match Env.typeref x env, Env.typeref y env with
+        | Type.Bool, Type.Bool | Type.Int,Type.Int -> 
+            IR.icmp ir Icmp.Sle (Env.varref x env) (Env.varref y env)
+        | Type.Float, Type.Float -> 
+            IR.fcmp ir Fcmp.Ole (Env.varref x env) (Env.varref y env)
+        | _ -> failwith "equality supported only for bool, int, and float"
+        in
+        if_ (ir, env) cond (flip f then_) (flip f else_)
     | Let ((x, ty), t1, t2) ->
         let v =
           f (ir, env) t1
