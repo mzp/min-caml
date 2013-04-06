@@ -8,6 +8,10 @@ void min_caml_print_int(int n) {
   printf("%d", n);
 }
 
+void min_caml_print_float(double f) {
+  printf("%lf", f);
+}
+
 void min_caml_print_byte(char ch) {
   putchar(ch);
 }

@@ -93,8 +93,8 @@ module IR = struct
           args
           +> array_map (of_type t)
           +> function_type (of_type t ret)
-      | Tuple _ ->
-          assert false
+      | Tuple ts ->
+          struct_type llcontext (array_map (of_type t) ts)
       | Array _ ->
           assert false
       | Var _ ->
@@ -153,6 +153,18 @@ module IR = struct
   let unit t =
     const_int (of_type t Type.Unit) 0
 
+  let int t n =
+    const_int (of_type t Type.Int) n
+
+  let float t f =
+    const_float (of_type t Type.Float) f
+
+  let struct_ { llcontext; _ } ts =
+    const_struct llcontext ts
+
+  let struct_ref { builder; _ } x n =
+     build_extractvalue x n (Id.gentmp Type.Int) builder
+
   let add { builder; _} x y =
     build_add x y (Id.gentmp Type.Int) builder
 
@@ -176,12 +188,6 @@ module IR = struct
 
   let fneg { builder; _ } x =
     build_fneg x (Id.gentmp Type.Float) builder
-
-  let int t n =
-    const_int (of_type t Type.Int) n
-
-  let float t f =
-    const_float (of_type t Type.Float) f
 
   let icmp { builder; _ } op x y =
     build_icmp op x y (Id.gentmp Type.Int) builder
@@ -304,11 +310,28 @@ module GenValue = struct
         | _ -> failwith "equality supported only for bool, int, and float"
         in
         if_ (ir, env) cond (flip f then_) (flip f else_)
-    | Let ((x, ty), t1, t2) ->
+    | Let ((x, ty), t, body) ->
         let v =
-          f (ir, env) t1
+          f (ir, env) t
         in
-        f (ir, Env.def x ty v env) t2
+        f (ir, Env.def x ty v env) body
+    | LetTuple (xs, tuple, body) ->
+        let tuple =
+          Env.varref tuple env
+        in
+        let i =
+          ref 0
+        in
+        let env =
+          ListLabels.fold_left ~init:env xs ~f:begin fun env (x, ty) ->
+            let env =
+              Env.def x ty (IR.struct_ref ir tuple !i) env
+            in
+            incr i;
+            env
+          end
+        in
+        f (ir, env) body
     | Var name ->
         Env.varref name env
     | MakeCls _ -> assert false
@@ -321,8 +344,8 @@ module GenValue = struct
           array_map (flip Env.varref env) args
         in
         IR.fun_call ir f args
-    | Tuple _ -> assert false
-    | LetTuple _ -> assert false
+    | Tuple xs ->
+        IR.struct_ ir (array_map (flip Env.varref env) xs)
     | Get _ -> assert false
     | Put _ -> assert false
     | ExtArray _ -> assert false
