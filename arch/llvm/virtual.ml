@@ -19,6 +19,12 @@ let uncurry f (x, y) =
 let flip f x y =
   f y x
 
+let rec range a b =
+  if a >= b then
+    []
+  else
+    a :: range (a+1) b
+
 let is_prefix prefix str =
   String.sub str 0 (String.length prefix) = prefix
 
@@ -27,8 +33,6 @@ let array_map f xs =
 
 let string_of_id (Id.L str) =
   str
-
-
 
 (* env *)
 module Env = struct
@@ -78,7 +82,9 @@ module IR = struct
       create_module llcontext "mincaml_module"
     in
     { llcontext; builder; module_ }
- 
+
+  let any_pointer_type { llcontext; _ } =
+    pointer_type (i8_type llcontext) 
 
   let rec of_type ({ llcontext } as t) =
     let open Type in
@@ -90,15 +96,47 @@ module IR = struct
       | Float ->
           double_type llcontext
       | Fun (args, ret) ->
-          args
-          +> array_map (of_type t)
-          +> function_type (of_type t ret)
+          let f =
+            args
+            +> List.map (of_type t)
+            +> (fun xs -> (any_pointer_type t) :: xs)
+            +> Array.of_list
+            +> function_type (of_type t ret)
+            +> pointer_type
+          in
+          struct_type llcontext [| f; any_pointer_type t |]
       | Tuple ts ->
           struct_type llcontext (array_map (of_type t) ts)
       | Array _ ->
           assert false
       | Var _ ->
           assert false
+
+  let func_type ({ llcontext } as t) =
+    let open Type in
+    function
+     | Fun (args, ret) ->
+         (* top level function becomes function.
+          * otherwise becomes function *pointer* *)
+         args
+         +> array_map (of_type t)
+         +> function_type (of_type t ret)
+     | _ ->
+         failwith "expect function type"
+
+  let closure_type ({ llcontext } as t) =
+    let open Type in
+    function
+     | Fun (args, ret) ->
+         (* top level function becomes function.
+          * otherwise becomes function *pointer* *)
+         args
+         +> List.map (of_type t)
+         +> (fun xs -> (any_pointer_type t) :: xs)
+         +> Array.of_list
+         +> function_type (of_type t ret)
+     | _ ->
+         failwith "expect function type"
 
   let block { llcontext; builder; _ } name fun_ ~f =
     let bb = 
@@ -117,7 +155,7 @@ module IR = struct
     f ()
     
   let declare_fun t name ty =
-    declare_function name (of_type t ty) t.module_
+    declare_function name ty t.module_
 
   let define_fun ({ llcontext; builder; module_ } as t) name ty ~f =
     let fun_ =
@@ -159,11 +197,17 @@ module IR = struct
   let float t f =
     const_float (of_type t Type.Float) f
 
+  let pointer { llcontext; _} () =
+    const_pointer_null (pointer_type (i8_type llcontext))
+
   let struct_ { llcontext; _ } ts =
     const_struct llcontext ts
 
   let struct_ref { builder; _ } x n =
-     build_extractvalue x n (Id.gentmp Type.Int) builder
+    build_extractvalue x n (Id.gentmp Type.Int) builder
+
+  let gep { builder; _ } x n =
+    build_struct_gep x n (Id.gentmp Type.Int) builder
 
   let add { builder; _} x y =
     build_add x y (Id.gentmp Type.Int) builder
@@ -334,8 +378,31 @@ module GenValue = struct
         f (ir, env) body
     | Var name ->
         Env.varref name env
-    | MakeCls _ -> assert false
-    | AppCls _ -> assert false
+    | MakeCls ((name, ty), { entry; Closure.actual_fv }, body) ->
+        let fv =
+          IR.struct_ ir (array_map (flip Env.varref env) actual_fv)
+        in
+        let cls =
+          IR.struct_ ir [|
+            Env.varref (string_of_id entry) env;
+            IR.pointer ir () (* FIXME *)
+        |]
+        in
+        let env =
+          Env.def name ty cls env
+        in
+        f (ir, env) body
+    | AppCls (name, args) -> 
+        let f  =
+          IR.struct_ref ir (Env.varref name env) 0
+        in
+        let fv =
+          IR.struct_ref ir (Env.varref name env) 1
+        in
+        let args =
+          List.map (flip Env.varref env) args
+        in
+        IR.fun_call ir f @@ Array.of_list ( fv :: args )
     | AppDir (f, args) ->
         let f =
           Env.varref (string_of_id f) env 
@@ -358,39 +425,64 @@ module GenFunction = struct
         "min_caml_" ^ name
       in
       let v = 
-        IR.declare_fun ir name ty
+        IR.declare_fun ir name (IR.func_type ir ty)
       in 
       Env.def name ty v env
     in
-    M.fold f !Typing.extenv env 
+    M.fold f !Typing.extenv env
 
-  let f (ir, env) { Closure.name = (name, ty); args; formal_fv; body } =
-    let ty =
-      match ty with
-      | Type.Fun (_, r) ->
-          (* add formal_fv's type to signature *)
-          Type.Fun (List.map snd (args @ formal_fv), r) 
-      | _ ->
-          failwith "must not happen"
-    in
-    let fun_ =
-      IR.define_fun ir (string_of_id name) ty ~f:begin fun ir fun_ ->
-        (* argument *) 
-        let env =
-          Array.to_list (params fun_) 
-          +> List.combine (args @ formal_fv)
-          +> ListLabels.fold_left ~init:env ~f:begin fun env ((x, ty), v) ->
-            Env.def x ty v env 
-          end
-        in
-        (* self *)
-        let env =
-          Env.def (string_of_id name) ty fun_ env
-        in
-        GenValue.f (ir, env) body
-      end
+  let add_env args params env =
+    params
+    +> List.combine args
+    +> ListLabels.fold_left ~init:env ~f:begin fun env ((x, ty), v) ->
+      Env.def x ty v env 
+    end
+
+  let params f =
+    Array.to_list @@ Llvm.params f
+
+  let generate_function (ir, env) { Closure.name = (name, ty); args; body } =
+    ty, IR.define_fun ir (string_of_id name) (IR.func_type ir ty) ~f:begin fun ir fun_ ->
+      (* argument *) 
+      let env =
+        add_env args (params fun_) env
+      in
+      (* self *)
+      let env =
+        Env.def (string_of_id name) ty fun_ env
+      in
+      GenValue.f (ir, env) body
+    end
+
+  let generate_closure (ir, env) { Closure.name = (name, ty); args; formal_fv; body } =
+    ty, IR.define_fun ir (string_of_id name) (IR.closure_type ir ty) ~f:begin fun ir fun_ ->
+      (* argument *) 
+      let env =
+        add_env args (List.tl @@ params fun_) env
+      in
+      (* fv *)
+      let actual_fv =
+        List.map (IR.int ir) @@ range 0 (List.length formal_fv)
+      in
+      let env =
+        add_env formal_fv actual_fv env
+      in
+      (* self *)
+      let env =
+        Env.def (string_of_id name) ty fun_ env
+      in
+      GenValue.f (ir, env) body
+    end
+
+  let f (ir, env) ( { Closure.formal_fv; name=(name,_) } as closure) = 
+    let ty, fun_ = 
+      if formal_fv = [] then
+        generate_function (ir, env) closure
+      else
+        generate_closure (ir, env) closure
     in
     (ir, Env.def (string_of_id name) ty fun_ env)
+
 end
 
 let stub body = {
