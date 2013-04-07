@@ -119,18 +119,6 @@ module IR = struct
          (* top level function becomes function.
           * otherwise becomes function *pointer* *)
          args
-         +> array_map (of_type t)
-         +> function_type (of_type t ret)
-     | _ ->
-         failwith "expect function type"
-
-  let closure_type ({ llcontext } as t) =
-    let open Type in
-    function
-     | Fun (args, ret) ->
-         (* top level function becomes function.
-          * otherwise becomes function *pointer* *)
-         args
          +> List.map (of_type t)
          +> (fun xs -> (any_pointer_type t) :: xs)
          +> Array.of_list
@@ -155,7 +143,7 @@ module IR = struct
     f ()
     
   let declare_fun t name ty =
-    declare_function name ty t.module_
+    declare_function name (func_type t ty) t.module_
 
   let define_fun ({ llcontext; builder; module_ } as t) name ty ~f =
     let fun_ =
@@ -197,11 +185,26 @@ module IR = struct
   let float t f =
     const_float (of_type t Type.Float) f
 
-  let pointer { llcontext; _} () =
+  let null { llcontext; _} =
     const_pointer_null (pointer_type (i8_type llcontext))
 
-  let struct_ { llcontext; _ } ts =
-    const_struct llcontext ts
+  let pointer ({ builder; _ } as t) v =
+    let ptr =
+      build_alloca (type_of v) "ptr" builder
+    in
+    let _ =
+      build_store v ptr builder
+    in
+    build_pointercast ptr (any_pointer_type t) "ptr_cast" builder
+
+  let struct_ { llcontext; _ } xs =
+    const_struct llcontext xs
+    
+  let struct_data ({ llcontext; builder; _ } as t) xs =
+    let ptr =
+      build_alloca (struct_type llcontext @@ Array.map type_of xs) "ptr" builder
+    in
+    build_pointercast ptr (any_pointer_type t) "ptr_cast" builder
 
   let struct_ref { builder; _ } x n =
     build_extractvalue x n (Id.gentmp Type.Int) builder
@@ -380,12 +383,12 @@ module GenValue = struct
         Env.varref name env
     | MakeCls ((name, ty), { entry; Closure.actual_fv }, body) ->
         let fv =
-          IR.struct_ ir (array_map (flip Env.varref env) actual_fv)
+          IR.struct_data ir (array_map (flip Env.varref env) actual_fv)
         in
         let cls =
           IR.struct_ ir [|
             Env.varref (string_of_id entry) env;
-            IR.pointer ir () (* FIXME *)
+            fv
         |]
         in
         let env =
@@ -408,9 +411,9 @@ module GenValue = struct
           Env.varref (string_of_id f) env 
         in
         let args =
-          array_map (flip Env.varref env) args
+          List.map (flip Env.varref env) args
         in
-        IR.fun_call ir f args
+        IR.fun_call ir f @@ Array.of_list (IR.null ir :: args)
     | Tuple xs ->
         IR.struct_ ir (array_map (flip Env.varref env) xs)
     | Get _ -> assert false
@@ -425,7 +428,7 @@ module GenFunction = struct
         "min_caml_" ^ name
       in
       let v = 
-        IR.declare_fun ir name (IR.func_type ir ty)
+        IR.declare_fun ir name ty
       in 
       Env.def name ty v env
     in
@@ -440,7 +443,7 @@ module GenFunction = struct
 
   let params f =
     Array.to_list @@ Llvm.params f
-
+(*
   let generate_function (ir, env) { Closure.name = (name, ty); args; body } =
     ty, IR.define_fun ir (string_of_id name) (IR.func_type ir ty) ~f:begin fun ir fun_ ->
       (* argument *) 
@@ -453,9 +456,9 @@ module GenFunction = struct
       in
       GenValue.f (ir, env) body
     end
-
+*)
   let generate_closure (ir, env) { Closure.name = (name, ty); args; formal_fv; body } =
-    ty, IR.define_fun ir (string_of_id name) (IR.closure_type ir ty) ~f:begin fun ir fun_ ->
+    ty, IR.define_fun ir (string_of_id name) ty ~f:begin fun ir fun_ ->
       (* argument *) 
       let env =
         add_env args (List.tl @@ params fun_) env
@@ -476,10 +479,7 @@ module GenFunction = struct
 
   let f (ir, env) ( { Closure.formal_fv; name=(name,_) } as closure) = 
     let ty, fun_ = 
-      if formal_fv = [] then
-        generate_function (ir, env) closure
-      else
-        generate_closure (ir, env) closure
+      generate_closure (ir, env) closure
     in
     (ir, Env.def (string_of_id name) ty fun_ env)
 
