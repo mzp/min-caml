@@ -25,6 +25,10 @@ let rec range a b =
   else
     a :: range (a+1) b
 
+let tee x f =
+  f x;
+  x
+
 let is_prefix prefix str =
   String.sub str 0 (String.length prefix) = prefix
 
@@ -46,7 +50,7 @@ module Env = struct
     tenv = M.empty
   }
 
-  let def name ty v { venv; tenv } = 
+  let def name ty v { venv; tenv } =
     set_value_name name v;
     {
       venv = M.add name v  venv;
@@ -65,26 +69,26 @@ module IR = struct
   type t = {
     llcontext : Llvm.llcontext;
     builder : Llvm.llbuilder;
-    module_ : Llvm.llmodule
+    module_ : Llvm.llmodule;
   }
 
   let module_ { module_; _ } =
     module_
 
-  let init () = 
+  let init () =
     let llcontext =
       Llvm.global_context ()
     in
     let builder =
       Llvm.builder llcontext
     in
-    let module_ = 
+    let module_ =
       create_module llcontext "mincaml_module"
     in
     { llcontext; builder; module_ }
 
   let any_pointer_type { llcontext; _ } =
-    pointer_type (i8_type llcontext) 
+    pointer_type (i8_type llcontext)
 
   let rec of_type ({ llcontext } as t) =
     let open Type in
@@ -119,18 +123,6 @@ module IR = struct
          (* top level function becomes function.
           * otherwise becomes function *pointer* *)
          args
-         +> array_map (of_type t)
-         +> function_type (of_type t ret)
-     | _ ->
-         failwith "expect function type"
-
-  let closure_type ({ llcontext } as t) =
-    let open Type in
-    function
-     | Fun (args, ret) ->
-         (* top level function becomes function.
-          * otherwise becomes function *pointer* *)
-         args
          +> List.map (of_type t)
          +> (fun xs -> (any_pointer_type t) :: xs)
          +> Array.of_list
@@ -139,21 +131,21 @@ module IR = struct
          failwith "expect function type"
 
   let block { llcontext; builder; _ } name fun_ ~f =
-    let bb = 
-      append_block llcontext name fun_ 
+    let bb =
+      append_block llcontext name fun_
     in
     let () =
       position_at_end bb builder
     in
     (bb, f ())
 
-  let current_block { builder; _ } = 
+  let current_block { builder; _ } =
     insertion_block builder
 
   let update_block { builder; _ } bb ~f =
     position_at_end bb builder;
     f ()
-    
+
   let declare_fun t name ty =
     declare_function name ty t.module_
 
@@ -163,7 +155,10 @@ module IR = struct
     in
     let () =
       ignore @@ block t "entry" fun_ ~f:(fun () ->
-        ignore @@ build_ret (f t fun_) builder)
+        let params =
+          Array.to_list @@ Llvm.params fun_
+        in
+        ignore @@ build_ret (f t fun_ params) builder)
     in
     dump_value fun_;
     Llvm_analysis.assert_valid_function fun_;
@@ -197,17 +192,8 @@ module IR = struct
   let float t f =
     const_float (of_type t Type.Float) f
 
-  let pointer { llcontext; _} () =
+  let null { llcontext; _} =
     const_pointer_null (pointer_type (i8_type llcontext))
-
-  let struct_ { llcontext; _ } ts =
-    const_struct llcontext ts
-
-  let struct_ref { builder; _ } x n =
-    build_extractvalue x n (Id.gentmp Type.Int) builder
-
-  let gep { builder; _ } x n =
-    build_struct_gep x n (Id.gentmp Type.Int) builder
 
   let add { builder; _} x y =
     build_add x y (Id.gentmp Type.Int) builder
@@ -239,6 +225,52 @@ module IR = struct
   let fcmp { builder; _ } op x y =
     build_fcmp op x y (Id.gentmp Type.Float) builder
 
+  let gep { builder; _ } x n =
+    build_struct_gep x n (Id.gentmp Type.Int) builder
+
+  let struct_alloc ({ builder; llcontext; _ } as t) xs =
+    let p =
+      build_alloca (struct_type llcontext @@ Array.map type_of xs) "p" builder
+    in
+    let () =
+      ArrayLabels.iteri xs ~f:begin fun i x ->
+        ignore @@ build_store x (gep t p i) builder
+      end
+    in
+    p
+
+  let struct_ ({ builder; _ } as t) xs =
+    let p =
+      struct_alloc t xs
+    in
+    build_load p "p" builder
+
+  let struct_ref { builder; _ } x n =
+    build_extractvalue x n (Id.gentmp Type.Int) builder
+
+  let struct_data ({ builder; _ } as t) xs =
+    let p =
+      struct_alloc t xs
+    in
+    build_pointercast p (any_pointer_type t) "p" builder
+
+  let struct_load ({builder; llcontext; _ } as t) ty p =
+    if ty = [] then
+      []
+    else
+      let pty =
+        pointer_type @@
+          struct_type llcontext @@
+          array_map (of_type t) @@
+          List.map snd ty
+      in
+      let s =
+        build_pointercast p pty "p" builder
+      in
+      ListLabels.mapi ty ~f:begin fun n (name, _) ->
+        build_load (gep t s n) name builder
+      end
+
 end
 
 module GenValue = struct
@@ -262,7 +294,7 @@ module GenValue = struct
           %tmp = phi [ %tmp1 %then], [%tmp2, %else ] ;; (3)
     *)
 
-    let start_bb = 
+    let start_bb =
       IR.current_block ir
     in
     let fun_ =
@@ -319,7 +351,7 @@ module GenValue = struct
     | Float f ->
         IR.float ir f
     | Neg x ->
-        IR.neg ir (Env.varref x env) 
+        IR.neg ir (Env.varref x env)
     | Add (x, y) ->
         IR.add ir (Env.varref x env) (Env.varref y env)
     | Sub (x, y) ->
@@ -334,12 +366,12 @@ module GenValue = struct
         IR.fmul ir (Env.varref x env) (Env.varref y env)
     | FDiv (x, y) ->
         IR.fdiv ir (Env.varref x env) (Env.varref y env)
-    | IfEq (x, y, then_, else_) -> 
+    | IfEq (x, y, then_, else_) ->
         let cond =
           match Env.typeref x env, Env.typeref y env with
-        | Type.Bool, Type.Bool | Type.Int,Type.Int -> 
+        | Type.Bool, Type.Bool | Type.Int,Type.Int ->
             IR.icmp ir Icmp.Eq (Env.varref x env) (Env.varref y env)
-        | Type.Float, Type.Float -> 
+        | Type.Float, Type.Float ->
             IR.fcmp ir Fcmp.Oeq (Env.varref x env) (Env.varref y env)
         | _ -> failwith "equality supported only for bool, int, and float"
         in
@@ -347,9 +379,9 @@ module GenValue = struct
     | IfLE (x, y, then_, else_) ->
         let cond =
           match Env.typeref x env, Env.typeref y env with
-        | Type.Bool, Type.Bool | Type.Int,Type.Int -> 
+        | Type.Bool, Type.Bool | Type.Int,Type.Int ->
             IR.icmp ir Icmp.Sle (Env.varref x env) (Env.varref y env)
-        | Type.Float, Type.Float -> 
+        | Type.Float, Type.Float ->
             IR.fcmp ir Fcmp.Ole (Env.varref x env) (Env.varref y env)
         | _ -> failwith "equality supported only for bool, int, and float"
         in
@@ -380,19 +412,19 @@ module GenValue = struct
         Env.varref name env
     | MakeCls ((name, ty), { entry; Closure.actual_fv }, body) ->
         let fv =
-          IR.struct_ ir (array_map (flip Env.varref env) actual_fv)
+          IR.struct_data ir (array_map (flip Env.varref env) actual_fv)
         in
         let cls =
           IR.struct_ ir [|
             Env.varref (string_of_id entry) env;
-            IR.pointer ir () (* FIXME *)
+            fv
         |]
         in
         let env =
           Env.def name ty cls env
         in
         f (ir, env) body
-    | AppCls (name, args) -> 
+    | AppCls (name, args) ->
         let f  =
           IR.struct_ref ir (Env.varref name env) 0
         in
@@ -405,12 +437,12 @@ module GenValue = struct
         IR.fun_call ir f @@ Array.of_list ( fv :: args )
     | AppDir (f, args) ->
         let f =
-          Env.varref (string_of_id f) env 
+          Env.varref (string_of_id f) env
         in
         let args =
-          array_map (flip Env.varref env) args
+          List.map (flip Env.varref env) args
         in
-        IR.fun_call ir f args
+        IR.fun_call ir f @@ Array.of_list (IR.null ir :: args)
     | Tuple xs ->
         IR.struct_ ir (array_map (flip Env.varref env) xs)
     | Get _ -> assert false
@@ -421,12 +453,12 @@ end
 module GenFunction = struct
   let import_extfun (ir, env) =
     let f name ty env =
-      let name = 
+      let name =
         "min_caml_" ^ name
       in
-      let v = 
+      let v =
         IR.declare_fun ir name (IR.func_type ir ty)
-      in 
+      in
       Env.def name ty v env
     in
     M.fold f !Typing.extenv env
@@ -435,34 +467,19 @@ module GenFunction = struct
     params
     +> List.combine args
     +> ListLabels.fold_left ~init:env ~f:begin fun env ((x, ty), v) ->
-      Env.def x ty v env 
+      Env.def x ty v env
     end
 
-  let params f =
-    Array.to_list @@ Llvm.params f
-
-  let generate_function (ir, env) { Closure.name = (name, ty); args; body } =
-    ty, IR.define_fun ir (string_of_id name) (IR.func_type ir ty) ~f:begin fun ir fun_ ->
-      (* argument *) 
+ let generate_closure (ir, env) { Closure.name = (name, ty); args; formal_fv; body } =
+    ty, IR.define_fun ir (string_of_id name) (IR.func_type ir ty) ~f:begin fun
+      ir fun_ params ->
+      (* argument *)
       let env =
-        add_env args (params fun_) env
-      in
-      (* self *)
-      let env =
-        Env.def (string_of_id name) ty fun_ env
-      in
-      GenValue.f (ir, env) body
-    end
-
-  let generate_closure (ir, env) { Closure.name = (name, ty); args; formal_fv; body } =
-    ty, IR.define_fun ir (string_of_id name) (IR.closure_type ir ty) ~f:begin fun ir fun_ ->
-      (* argument *) 
-      let env =
-        add_env args (List.tl @@ params fun_) env
+        add_env args (List.tl @@ params) env
       in
       (* fv *)
       let actual_fv =
-        List.map (IR.int ir) @@ range 0 (List.length formal_fv)
+        IR.struct_load ir formal_fv @@ List.hd params
       in
       let env =
         add_env formal_fv actual_fv env
@@ -474,29 +491,29 @@ module GenFunction = struct
       GenValue.f (ir, env) body
     end
 
-  let f (ir, env) ( { Closure.formal_fv; name=(name,_) } as closure) = 
-    let ty, fun_ = 
-      if formal_fv = [] then
-        generate_function (ir, env) closure
-      else
-        generate_closure (ir, env) closure
+  let f (ir, env) ( { Closure.formal_fv; name=(name,_) } as closure) =
+    let ty, fun_ =
+      generate_closure (ir, env) closure
     in
     (ir, Env.def (string_of_id name) ty fun_ env)
-
 end
 
-let stub body = {
-  Closure.name = (Id.L "min_caml_start", Type.Fun([], Type.Unit));
-  args         = []; 
-  formal_fv    = []; 
-  body
-} 
- 
+module GenMain = struct
+  let f (ir,env) body =
+    let ty =
+      function_type (IR.of_type ir Type.Unit)
+        [| IR.any_pointer_type ir; IR.any_pointer_type ir|]
+    in
+    ignore @@ IR.define_fun ir "min_caml_start" ty  ~f:begin fun ir _ _ ->
+      GenValue.f (ir, env) body
+    end
+end
+
 let f (Closure.Prog(funs, body)) =
  let ir =
     IR.init ()
   in
-  let env = 
+  let env =
     Env.empty
   in
   let env =
@@ -505,7 +522,11 @@ let f (Closure.Prog(funs, body)) =
   let (ir, env) =
     List.fold_left GenFunction.f (ir, env) funs
   in
-  let (ir,env) =
-    GenFunction.f (ir,env ) (stub body)
+  let () =
+    GenMain.f (ir, env) body
   in
-  IR.module_ ir
+  let module_ =
+    IR.module_ ir
+  in
+  Llvm_analysis.assert_valid_module module_;
+  module_

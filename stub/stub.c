@@ -19,7 +19,7 @@ int main() {
     return 1;
   }
   fprintf(stderr, "sp = %p, hp = %p\n", sp, hp);
-  min_caml_start();
+  min_caml_start(sp, hp);
 
   return 0;
 }
