@@ -271,6 +271,103 @@ module IR = struct
         build_load (gep t s n) name builder
       end
 
+  let init_array ({ builder; llcontext; _} as t) xs n v =
+  (*
+       %p = alloca i32
+       store i32 0, i32* %p
+       br label %init.cond
+
+     init.cond:
+       %i = load i32* %p
+       %cond= icmp slt i32 %i, 10
+       br i1 %cond, %init.body, %init.end
+
+     init.body:
+       %i = load i32* %p
+       %gep = getelementptr inbounds i32* %xs, i32 %i
+       store i32 v, i32* %gep
+       %i = add i32 %i, 1
+       store i32 %i, i32* %p
+       br %init.cond
+
+     init.end:
+  *)
+    let start_bb =
+      current_block t
+    in
+    let fun_ =
+      block_parent start_bb
+    in
+    let p =
+      build_alloca (i32_type llcontext) "p" builder
+    in
+    let _ =
+      build_store (int t 0) p builder
+    in
+    (* (1) *)
+    let (cond_bb, ())   =
+      block t "init.cond" fun_ ~f:begin fun () ->
+        ()
+      end
+    in
+    (* (2) *)
+    let (body_bb, ())  =
+      block t "init.body" fun_ ~f:begin fun () ->
+        let i =
+          build_load p "i" builder
+        in
+        let _ =
+          build_store v (build_in_bounds_gep xs [| i |] "gep" builder) builder
+        in
+        let _ =
+          build_store (add t i (int t 1)) p builder
+        in
+        ignore @@ br t cond_bb
+     end
+    in
+    let (end_bb, ())  =
+      block t "init.end" fun_ ~f:begin fun () ->
+        ()
+     end
+    in
+    (* (4) *)
+    let ()  =
+      update_block t cond_bb ~f:begin fun () ->
+        let i =
+          build_load p "i" builder
+        in
+        let cond =
+          icmp t Icmp.Slt i n
+        in
+        ignore @@ cond_br t cond body_bb end_bb
+      end
+    in
+    let ()  =
+      update_block t start_bb ~f:begin fun () ->
+        ignore @@ br t cond_bb
+      end
+    in
+    let ()  =
+      update_block t end_bb ~f:begin fun () ->
+        ()
+      end
+    in
+    ()
+
+  let create_array ({ builder; _ } as t) n value =
+    let xs =
+      build_array_alloca (type_of value) n "array" builder
+    in
+    init_array t xs n value;
+    xs
+
+  let array_ref { builder; _ } xs n =
+    build_load (build_in_bounds_gep xs [| n |] "gep" builder) "array_element" builder
+
+  let array_set ({ builder; _ } as t) xs n v =
+    ignore @@ build_store v (build_in_bounds_gep xs [| n |] "gep" builder) builder;
+    unit t
+
 end
 
 module GenValue = struct
@@ -293,7 +390,6 @@ module GenValue = struct
         ifcont:
           %tmp = phi [ %tmp1 %then], [%tmp2, %else ] ;; (3)
     *)
-
     let start_bb =
       IR.current_block ir
     in
@@ -435,6 +531,8 @@ module GenValue = struct
           List.map (flip Env.varref env) args
         in
         IR.fun_call ir f @@ Array.of_list ( fv :: args )
+    | AppDir (Id.L "min_caml_create_array", [n; value]) ->
+        IR.create_array ir (Env.varref n env) (Env.varref value env)
     | AppDir (f, args) ->
         let f =
           Env.varref (string_of_id f) env
@@ -445,8 +543,13 @@ module GenValue = struct
         IR.fun_call ir f @@ Array.of_list (IR.null ir :: args)
     | Tuple xs ->
         IR.struct_ ir (array_map (flip Env.varref env) xs)
-    | Get _ -> assert false
-    | Put _ -> assert false
+    | Get (xs, n) ->
+        IR.array_ref ir (Env.varref xs env) (Env.varref n env)
+    | Put (xs, n, v) ->
+        IR.array_set ir
+           (Env.varref xs env)
+           (Env.varref n  env)
+           (Env.varref v  env)
     | ExtArray _ -> assert false
 end
 
