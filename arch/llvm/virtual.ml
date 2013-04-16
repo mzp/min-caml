@@ -58,10 +58,16 @@ module Env = struct
     }
 
   let varref name { venv; _ } =
-    M.find name venv
+    try
+      M.find name venv
+    with Not_found ->
+      failwith (name ^ " is not found")
 
   let typeref name { tenv; _ } =
-    M.find name tenv
+    try
+      M.find name tenv
+    with Not_found ->
+      failwith (name ^ " is not found")
 end
 
 module IR = struct
@@ -111,8 +117,9 @@ module IR = struct
           struct_type llcontext [| f; any_pointer_type t |]
       | Tuple ts ->
           struct_type llcontext (array_map (of_type t) ts)
-      | Array _ ->
-          assert false
+      | Array x ->
+          (* 配列は、ポインタに対応づける *)
+          pointer_type (of_type t x)
       | Var _ ->
           assert false
 
@@ -531,7 +538,8 @@ module GenValue = struct
           List.map (flip Env.varref env) args
         in
         IR.fun_call ir f @@ Array.of_list ( fv :: args )
-    | AppDir (Id.L "min_caml_create_array", [n; value]) ->
+    | AppDir (Id.L "min_caml_create_array", [n; value])
+    | AppDir (Id.L "min_caml_create_float_array", [n; value]) ->
         IR.create_array ir (Env.varref n env) (Env.varref value env)
     | AppDir (f, args) ->
         let f =
