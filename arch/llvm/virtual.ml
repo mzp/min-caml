@@ -528,11 +528,20 @@ module GenValue = struct
         in
         f (ir, env) body
     | AppCls (name, args) ->
-        let f  =
-          IR.struct_ref ir (Env.varref name env) 0
+        let x =
+          Env.varref name env
         in
-        let fv =
-          IR.struct_ref ir (Env.varref name env) 1
+        let (f, fv) =
+          x
+          +> type_of
+          +> classify_type
+          +> function
+            | TypeKind.Struct ->
+                (IR.struct_ref ir x 0, IR.struct_ref ir x 1)
+            | TypeKind.Pointer ->
+                (x, IR.null ir)
+            | _ ->
+                assert false
         in
         let args =
           List.map (flip Env.varref env) args
