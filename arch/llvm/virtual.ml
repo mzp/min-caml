@@ -167,7 +167,6 @@ module IR = struct
         in
         ignore @@ build_ret (f t fun_ params) builder)
     in
-    dump_value fun_;
     Llvm_analysis.assert_valid_function fun_;
     fun_
 
