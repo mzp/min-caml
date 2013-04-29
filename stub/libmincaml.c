@@ -4,6 +4,17 @@ void min_caml_print_newline(void* fv, int unit) {
   putchar('\n');
 }
 
+void dump(void* fv) {
+  printf("[%x]\n", fv);
+}
+void dump2(void* fv) {
+  printf("[[%x]]\n", fv);
+}
+
+
+void split(){
+  printf("-----------\n");
+}
 void min_caml_print_int(void* fv, int n) {
   printf("%d", n);
 }

@@ -42,26 +42,64 @@ let string_of_id (Id.L str) =
 module Env = struct
   type t = {
     venv : Llvm.llvalue M.t;
-    tenv : Type.t M.t
+    tenv : Type.t M.t;
+    fenv : string list;
+    penv : string list;
+    fwrap : Llvm.llvalue -> Llvm.llvalue;
+    pwrap : Llvm.llvalue -> Llvm.llvalue;
   }
 
   let empty = {
     venv = M.empty;
-    tenv = M.empty
+    tenv = M.empty;
+    fenv = [];
+    penv = [];
+    fwrap = id;
+    pwrap = id;
   }
 
-  let def name ty v { venv; tenv } =
+  let wrap ~f env =
+    { env with fwrap = f }
+
+  let pwrap ~f env =
+    { env with pwrap = f }
+
+  let def name ty v ({ venv; tenv; fenv; penv; _ } as env) =
     set_value_name name v;
-    {
+    { env with
       venv = M.add name v  venv;
-      tenv = M.add name ty tenv
+      tenv = M.add name ty tenv;
+      fenv = List.filter (fun x -> x <> name) fenv;
+      penv = List.filter (fun x -> x <> name) penv;
     }
 
-  let varref name { venv; _ } =
+  let defun name ty v ({ fenv; _ } as env) =
+    Printf.printf "defun %s\n" name;
+    { (def name ty v env) with
+        fenv = name :: fenv }
+
+  let defp name ty v ({ penv; _ } as env) =
+    Printf.printf "defp %s\n" name;
+    { (def name ty v env) with
+        penv = name :: penv }
+
+  let vref name { venv; _ } =
     try
       M.find name venv
     with Not_found ->
       failwith (name ^ " is not found")
+
+  let varref name ({ venv; fenv; fwrap; penv; pwrap; _ } as env) =
+    Printf.printf"varref %s\n" name;
+    let v =
+      vref name env
+    in
+    if List.mem name fenv then
+      fwrap v
+    else if List.mem name penv then
+      (print_endline "->p"; pwrap v)
+    else
+      v
 
   let typeref name { tenv; _ } =
     try
@@ -114,7 +152,7 @@ module IR = struct
             +> function_type (of_type t ret)
             +> pointer_type
           in
-          struct_type llcontext [| f; any_pointer_type t |]
+          pointer_type @@ struct_type llcontext [| f; any_pointer_type t |]
       | Tuple ts ->
           struct_type llcontext (array_map (of_type t) ts)
       | Array x ->
@@ -167,6 +205,7 @@ module IR = struct
         in
         ignore @@ build_ret (f t fun_ params) builder)
     in
+    dump_value fun_;
     Llvm_analysis.assert_valid_function fun_;
     fun_
 
@@ -245,14 +284,23 @@ module IR = struct
     in
     p
 
+  let load { builder; _ } p =
+    build_load p "x" builder
+
+  let struct_const { llcontext; _ } xs =
+    const_struct llcontext @@ Array.of_list xs
+
   let struct_ ({ builder; _ } as t) xs =
     let p =
       struct_alloc t xs
     in
-    build_load p "p" builder
+    load t p
 
   let struct_ref { builder; _ } x n =
     build_extractvalue x n (Id.gentmp Type.Int) builder
+
+  let struct_ref2 ({ builder; _ } as t) x n =
+    load t (gep t x n)
 
   let struct_data ({ builder; _ } as t) xs =
     let p =
@@ -274,7 +322,7 @@ module IR = struct
         build_pointercast p pty "p" builder
       in
       ListLabels.mapi ty ~f:begin fun n (name, _) ->
-        build_load (gep t s n) name builder
+        (gep t s n)
       end
 
   let init_array ({ builder; llcontext; _} as t) xs n v =
@@ -412,7 +460,7 @@ module GenValue = struct
         (v, IR.current_block ir)
       end
     in
-    (* (2) *)
+   (* (2) *)
     let (else_bb, (else_val, else_br))  =
       IR.block ir "else" fun_ ~f:begin fun () ->
         let v =
@@ -443,6 +491,21 @@ module GenValue = struct
     in
     IR.update_block ir ifcont_bb ~f:id;
     phi
+
+  let make_cls (ir,env) name ty f actual_fv =
+    let fv =
+      if actual_fv = [] then
+        IR.null ir
+      else
+        IR.struct_data ir @@ Array.of_list actual_fv
+    in
+    let cls =
+      IR.struct_alloc ir [| f; fv |]
+    in
+    let env =
+      Env.def name ty cls env
+    in
+    (cls, env)
 
   let rec f (ir, env) : Closure.t -> Llvm.llvalue =
   function
@@ -484,9 +547,11 @@ module GenValue = struct
         | Type.Bool, Type.Bool | Type.Int,Type.Int ->
             IR.icmp ir Icmp.Sle (Env.varref x env) (Env.varref y env)
         | Type.Float, Type.Float ->
-            IR.fcmp ir Fcmp.Ole (Env.varref x env) (Env.varref y env)
+            IR.fcmp ir Fcmp.Olt (Env.varref x env) (Env.varref y env)
         | _ -> failwith "equality supported only for bool, int, and float"
         in
+        let _ = prerr_endline "==========" in
+        let _ = dump_value cond in
         if_ (ir, env) cond (flip f then_) (flip f else_)
     | Let ((x, ty), t, body) ->
         let v =
@@ -513,50 +578,47 @@ module GenValue = struct
     | Var name ->
         Env.varref name env
     | MakeCls ((name, ty), { entry; Closure.actual_fv }, body) ->
+        let _ =
+          Printf.printf "make cls: %s\n" name;
+          flush stdout
+        in
+        let fun_ =
+          IR.struct_ref ir (Env.varref (string_of_id entry) env) 0
+        in
         let fv =
-          IR.struct_data ir (array_map (flip Env.varref env) actual_fv)
+          List.map (flip Env.varref env) actual_fv
         in
-        let cls =
-          IR.struct_ ir [|
-            Env.varref (string_of_id entry) env;
-            fv
-        |]
-        in
-        let env =
-          Env.def name ty cls env
+        let (_, env) =
+          make_cls (ir,env) name ty fun_ fv
         in
         f (ir, env) body
-    | AppCls (name, args) ->
-        let x =
-          Env.varref name env
-        in
-        let (f, fv) =
-          x
-          +> type_of
-          +> classify_type
-          +> function
-            | TypeKind.Struct ->
-                (IR.struct_ref ir x 0, IR.struct_ref ir x 1)
-            | TypeKind.Pointer ->
-                (x, IR.null ir)
-            | _ ->
-                assert false
-        in
-        let args =
-          List.map (flip Env.varref env) args
-        in
-        IR.fun_call ir f @@ Array.of_list ( fv :: args )
     | AppDir (Id.L "min_caml_create_array", [n; value])
     | AppDir (Id.L "min_caml_create_float_array", [n; value]) ->
         IR.create_array ir (Env.varref n env) (Env.varref value env)
     | AppDir (f, args) ->
+        let _ = Printf.printf "appdir: %s\n" @@ string_of_id f; flush stdout in
         let f =
-          Env.varref (string_of_id f) env
+          IR.struct_ref ir (Env.varref (string_of_id f) env) 0
         in
         let args =
           List.map (flip Env.varref env) args
         in
         IR.fun_call ir f @@ Array.of_list (IR.null ir :: args)
+    | AppCls (name, args) ->
+        let _ = Printf.printf "appcls: %s\n" name; flush stdout in
+        let x =
+          Env.varref name env
+        in
+        let f =
+          IR.struct_ref2 ir x 0
+        in
+        let fv =
+          IR.struct_ref2 ir x 1
+        in
+        let args =
+          List.map (flip Env.varref env) args
+        in
+        IR.fun_call ir f @@ Array.of_list ( fv :: args )
     | Tuple xs ->
         IR.struct_ ir (array_map (flip Env.varref env) xs)
     | Get (xs, n) ->
@@ -578,34 +640,37 @@ module GenFunction = struct
       let v =
         IR.declare_fun ir name (IR.func_type ir ty)
       in
-      Env.def name ty v env
+      Env.defun name ty v env
     in
     M.fold f !Typing.extenv env
 
-  let add_env args params env =
+  let add_env def args params env =
     params
     +> List.combine args
     +> ListLabels.fold_left ~init:env ~f:begin fun env ((x, ty), v) ->
-      Env.def x ty v env
+      def x ty v env
     end
 
  let generate_closure (ir, env) { Closure.name = (name, ty); args; formal_fv; body } =
+   Printf.printf "define: %s\n" (string_of_id name);
     ty, IR.define_fun ir (string_of_id name) (IR.func_type ir ty) ~f:begin fun
       ir fun_ params ->
       (* argument *)
       let env =
-        add_env args (List.tl @@ params) env
+        add_env Env.def args (List.tl @@ params) env
       in
       (* fv *)
       let actual_fv =
         IR.struct_load ir formal_fv @@ List.hd params
       in
       let env =
-        add_env formal_fv actual_fv env
+        add_env Env.defp formal_fv actual_fv env
       in
       (* self *)
-      let env =
-        Env.def (string_of_id name) ty fun_ env
+      let (_, env) =
+        GenValue.make_cls (ir, env) (string_of_id name) ty fun_ @@
+        List.map (flip Env.varref env) @@ List.map fst formal_fv
+(*        Env.defun (string_of_id name) ty fun_ env*)
       in
       GenValue.f (ir, env) body
     end
@@ -614,7 +679,7 @@ module GenFunction = struct
     let ty, fun_ =
       generate_closure (ir, env) closure
     in
-    (ir, Env.def (string_of_id name) ty fun_ env)
+    (ir, Env.defun (string_of_id name) ty fun_ env)
 end
 
 module GenMain = struct
@@ -634,6 +699,12 @@ let f (Closure.Prog(funs, body)) =
   in
   let env =
     Env.empty
+  in
+  let env =
+    Env.wrap env ~f:(fun f -> IR.struct_const ir [ f; IR.null ir ])
+  in
+  let env =
+    Env.pwrap env ~f:(fun p -> IR.load ir p)
   in
   let env =
     GenFunction.import_extfun (ir,env)
