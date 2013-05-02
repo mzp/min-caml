@@ -90,14 +90,13 @@ module Env = struct
       failwith (name ^ " is not found")
 
   let varref name ({ venv; fenv; fwrap; penv; pwrap; _ } as env) =
-    Printf.printf"varref %s\n" name;
     let v =
       vref name env
     in
     if List.mem name fenv then
       fwrap v
     else if List.mem name penv then
-      (print_endline "->p"; pwrap v)
+      pwrap v
     else
       v
 
@@ -114,6 +113,7 @@ module IR = struct
     llcontext : Llvm.llcontext;
     builder : Llvm.llbuilder;
     module_ : Llvm.llmodule;
+    malloc  : Llvm.llvalue
   }
 
   let module_ { module_; _ } =
@@ -129,7 +129,13 @@ module IR = struct
     let module_ =
       create_module llcontext "mincaml_module"
     in
-    { llcontext; builder; module_ }
+    let null =
+      const_pointer_null (pointer_type (i8_type llcontext))
+    in
+    { llcontext; builder; module_; malloc = null }
+
+  let malloc ir f =
+    { ir with malloc = f }
 
   let any_pointer_type { llcontext; _ } =
     pointer_type (i8_type llcontext)
@@ -240,25 +246,28 @@ module IR = struct
   let null { llcontext; _} =
     const_pointer_null (pointer_type (i8_type llcontext))
 
-  let add { builder; _} x y =
+  let add { builder; _ } x y =
     build_add x y (Id.gentmp Type.Int) builder
 
-  let sub { builder; _} x y =
+  let sub { builder; _ } x y =
     build_sub x y (Id.gentmp Type.Int) builder
+
+  let mul { builder; _ } x y =
+    build_mul x y (Id.gentmp Type.Int) builder
 
   let neg { builder; _ } x =
     build_neg x (Id.gentmp Type.Int) builder
 
-  let fadd { builder; _} x y =
+  let fadd { builder; _ } x y =
     build_fadd x y (Id.gentmp Type.Float) builder
 
-  let fsub { builder; _} x y =
+  let fsub { builder; _ } x y =
     build_fsub x y (Id.gentmp Type.Float) builder
 
-  let fmul { builder; _} x y =
+  let fmul { builder; _ } x y =
     build_fmul x y (Id.gentmp Type.Float) builder
 
-  let fdiv { builder; _} x y =
+  let fdiv { builder; _ } x y =
     build_fdiv x y (Id.gentmp Type.Float) builder
 
   let fneg { builder; _ } x =
@@ -273,13 +282,28 @@ module IR = struct
   let gep { builder; _ } x n =
     build_struct_gep x n (Id.gentmp Type.Int) builder
 
+  let alloc ({ builder; malloc; _ } as t) ty =
+    let size =
+      size_of ty
+    in
+    let p =
+      fun_call t malloc [| size |]
+    in
+    let ty =
+      pointer_type ty
+    in
+    let ptr =
+      build_pointercast p ty "alloc" builder
+    in
+    ptr
+
   let struct_alloc ({ builder; llcontext; _ } as t) xs =
     let p =
-      build_alloca (struct_type llcontext @@ Array.map type_of xs) "p" builder
+      alloc t @@ struct_type llcontext @@ Array.map type_of xs
     in
     let () =
       ArrayLabels.iteri xs ~f:begin fun i x ->
-        ignore @@ build_store x (gep t p i) builder
+        ignore @@ build_store x (gep t p i)  builder
       end
     in
     p
@@ -408,9 +432,21 @@ module IR = struct
     in
     ()
 
-  let create_array ({ builder; _ } as t) n value =
+  let create_array ({ builder; llcontext; malloc; _ } as t) n value =
+    let size =
+      size_of @@ type_of value
+    in
+    let ty =
+      pointer_type @@ type_of value
+    in
+    let m =
+      build_sext n (i64_type llcontext) "n" builder
+    in
+    let p =
+      fun_call t malloc [| mul t size m |]
+    in
     let xs =
-      build_array_alloca (type_of value) n "array" builder
+      build_pointercast p ty "array" builder
     in
     init_array t xs n value;
     xs
@@ -493,6 +529,7 @@ module GenValue = struct
     phi
 
   let make_cls (ir,env) name ty f actual_fv =
+    Printf.printf "make_cls %s\n" name;
     let fv =
       if actual_fv = [] then
         IR.null ir
@@ -550,8 +587,6 @@ module GenValue = struct
             IR.fcmp ir Fcmp.Olt (Env.varref x env) (Env.varref y env)
         | _ -> failwith "equality supported only for bool, int, and float"
         in
-        let _ = prerr_endline "==========" in
-        let _ = dump_value cond in
         if_ (ir, env) cond (flip f then_) (flip f else_)
     | Let ((x, ty), t, body) ->
         let v =
@@ -583,7 +618,7 @@ module GenValue = struct
           flush stdout
         in
         let fun_ =
-          IR.struct_ref ir (Env.varref (string_of_id entry) env) 0
+          IR.struct_ref2 ir (Env.varref (string_of_id entry) env) 0
         in
         let fv =
           List.map (flip Env.varref env) actual_fv
@@ -595,17 +630,18 @@ module GenValue = struct
     | AppDir (Id.L "min_caml_create_array", [n; value])
     | AppDir (Id.L "min_caml_create_float_array", [n; value]) ->
         IR.create_array ir (Env.varref n env) (Env.varref value env)
-    | AppDir (f, args) ->
-        let _ = Printf.printf "appdir: %s\n" @@ string_of_id f; flush stdout in
+    | AppDir (name, args) ->
         let f =
-          IR.struct_ref ir (Env.varref (string_of_id f) env) 0
+          IR.struct_ref2 ir (Env.varref (string_of_id name) env) 0
         in
         let args =
           List.map (flip Env.varref env) args
         in
-        IR.fun_call ir f @@ Array.of_list (IR.null ir :: args)
+        let ret =
+          IR.fun_call ir f @@ Array.of_list (IR.null ir :: args)
+        in
+        ret
     | AppCls (name, args) ->
-        let _ = Printf.printf "appcls: %s\n" name; flush stdout in
         let x =
           Env.varref name env
         in
@@ -632,6 +668,14 @@ module GenValue = struct
 end
 
 module GenFunction = struct
+  let declare_stdlib (ir, env) =
+    let malloc =
+      IR.declare_fun ir "malloc" @@
+        function_type (IR.any_pointer_type ir) [|
+          i64_type ir.IR.llcontext |]
+    in
+    IR.malloc ir malloc
+
   let import_extfun (ir, env) =
     let f name ty env =
       let name =
@@ -652,7 +696,6 @@ module GenFunction = struct
     end
 
  let generate_closure (ir, env) { Closure.name = (name, ty); args; formal_fv; body } =
-   Printf.printf "define: %s\n" (string_of_id name);
     ty, IR.define_fun ir (string_of_id name) (IR.func_type ir ty) ~f:begin fun
       ir fun_ params ->
       (* argument *)
@@ -672,6 +715,7 @@ module GenFunction = struct
         List.map (flip Env.varref env) @@ List.map fst formal_fv
 (*        Env.defun (string_of_id name) ty fun_ env*)
       in
+      (* fv *)
       GenValue.f (ir, env) body
     end
 
@@ -700,14 +744,17 @@ let f (Closure.Prog(funs, body)) =
   let env =
     Env.empty
   in
+  let ir =
+    GenFunction.declare_stdlib (ir, env)
+  in
   let env =
-    Env.wrap env ~f:(fun f -> IR.struct_const ir [ f; IR.null ir ])
+    Env.wrap env ~f:(fun f -> IR.struct_alloc ir [| f; IR.null ir |])
   in
   let env =
     Env.pwrap env ~f:(fun p -> IR.load ir p)
   in
-  let env =
-    GenFunction.import_extfun (ir,env)
+ let env =
+    GenFunction.import_extfun (ir, env)
   in
   let (ir, env) =
     List.fold_left GenFunction.f (ir, env) funs

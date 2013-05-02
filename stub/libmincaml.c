@@ -1,6 +1,17 @@
 #include <stdio.h>
 #include <math.h>
 
+void min_caml_border() {
+  puts("==========");
+}
+int dump(void* p){
+  printf("[[%p]]\n", p);
+  return 0;
+}
+
+void min_caml_debug(void* fv, int n) {
+  printf("[%d]\n", n);
+}
 void min_caml_print_newline(void* fv, int unit) {
   putchar('\n');
 }

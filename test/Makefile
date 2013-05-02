@@ -13,7 +13,7 @@ inprod inprod-rec inprod-loop matmul matmul-flat
 do_test: $(TESTS:%=%.cmp)
 
 .PRECIOUS: %.s % %.res %.ans %.cmp
-TRASH = $(TESTS:%=%.s) $(TESTS:%=%) $(TESTS:%=%.res) $(TESTS:%=%.ans) $(TESTS:%=%.cmp)
+TRASH = $(TESTS:%=%.s) $(TESTS:%=%) $(TESTS:%=%.res) $(TESTS:%=%.ans) $(TESTS:%=%.cmp) *.bc
 
 %.s: %.ml
 	$(MINCAML) $*
