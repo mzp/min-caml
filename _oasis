@@ -7,7 +7,7 @@ License:     BSD3
 Plugins:     META (0.3), DevFiles (0.3)
 
 
-Executable main
+Executable mincaml
   Path:       src
   DataFiles: stub/*
   BuildTools: ocamlbuild

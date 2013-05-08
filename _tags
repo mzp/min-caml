@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 74af1a00ea96776e93c6e354a95b7473)
+# DO NOT EDIT (digest: f9c4b76fec196347610db9f7035afb60)
 # Ignore VCS directories, you can use the same kind of rule outside 
 # OASIS_START/STOP if you want to exclude directories that contains 
 # useless stuff for the build process
@@ -13,8 +13,8 @@
 ".git": not_hygienic
 "_darcs": -traverse
 "_darcs": not_hygienic
-# Executable main
-"src/main.native": use_libmain_stubs
+# Executable mincaml
+"src/main.native": use_libmincaml_stubs
 "src/main.native": pkg_llvm
 "src/main.native": pkg_llvm.executionengine
 "src/main.native": pkg_llvm.analysis
